@@ -1,0 +1,195 @@
+#RequireAdmin
+#include <GUIConstantsEx.au3>
+#include <WindowsConstants.au3>
+#include <EditConstants.au3>
+#include <ComboConstants.au3>
+#include <Date.au3>
+
+; =========================
+; CONFIG
+; =========================
+Global $g_sLogDir   = @ScriptDir & "\Logs"
+Global $g_sLogFile  = $g_sLogDir & "\ChangePassword.log"
+Global $g_bShowPass = False
+
+; =========================
+; GUI
+; =========================
+Global $hGUI = GUICreate("🔐 Tùng Nguyễn - SNC VIETNAM LIGHTING", 460, 280)
+
+GUICtrlCreateLabel("User:", 30, 25, 100, 20)
+Global $cbUser = GUICtrlCreateCombo("", 150, 20, 240, 25, $CBS_DROPDOWNLIST)
+
+GUICtrlCreateLabel("Mật khẩu mới:", 30, 70, 120, 20)
+Global $inpPass1 = GUICtrlCreateInput("", 150, 65, 240, 25, $ES_PASSWORD)
+
+GUICtrlCreateLabel("Xác nhận:", 30, 110, 120, 20)
+Global $inpPass2 = GUICtrlCreateInput("", 150, 105, 240, 25, $ES_PASSWORD)
+
+GUICtrlCreateLabel("Hết hạn sau (ngày):", 30, 150, 130, 20)
+Global $inpExpire = GUICtrlCreateInput("90", 170, 145, 80, 25)
+
+Global $btnToggle = GUICtrlCreateButton("👁", 400, 65, 40, 65)
+Global $btnChange = GUICtrlCreateButton("🔄 Áp dụng", 120, 210, 100, 40)
+Global $btnExit   = GUICtrlCreateButton("❌ Thoát", 280, 210, 100, 40)
+
+GUISetState(@SW_SHOW)
+
+_LoadUsers()
+
+; =========================
+; LOOP
+; =========================
+While 1
+    Switch GUIGetMsg()
+        Case $GUI_EVENT_CLOSE, $btnExit
+            Exit
+
+        Case $btnToggle
+            _TogglePassword()
+
+        Case $btnChange
+            _Apply()
+    EndSwitch
+WEnd
+
+; =========================
+; FUNCTIONS
+; =========================
+Func _LoadUsers()
+    Local $sList = ""
+    Local $sCmd = 'wmic UserAccount where "LocalAccount=True and Disabled=False" get Name'
+    Local $iPID = Run(@ComSpec & " /c " & $sCmd, "", @SW_HIDE, $STDOUT_CHILD)
+
+    While 1
+        Local $sLine = StdoutRead($iPID)
+        If @error Then ExitLoop
+        $sList &= $sLine
+    WEnd
+
+    Local $aLines = StringSplit(StringStripWS($sList, 3), @CRLF, 1)
+    For $i = 1 To $aLines[0]
+        If $aLines[$i] <> "" And $aLines[$i] <> "Name" Then
+            GUICtrlSetData($cbUser, $aLines[$i])
+        EndIf
+    Next
+
+    GUICtrlSetData($cbUser, @UserName)
+EndFunc
+
+Func _Apply()
+    Local $sUser = GUICtrlRead($cbUser)
+    Local $p1    = GUICtrlRead($inpPass1)
+    Local $p2    = GUICtrlRead($inpPass2)
+    Local $iDays = Int(GUICtrlRead($inpExpire))
+
+    If $sUser = "" Or $p1 = "" Or $p2 = "" Then
+        MsgBox(48, "Thiếu thông tin", "Vui lòng nhập đầy đủ")
+        _WriteLog("WARN - Thiếu dữ liệu đầu vào")
+        Return
+    EndIf
+
+    If $p1 <> $p2 Then
+        MsgBox(16, "Lỗi", "Mật khẩu xác nhận không khớp")
+        _WriteLog("ERROR - Mật khẩu không khớp | User=" & $sUser)
+        Return
+    EndIf
+
+    ; ===== CHECK PASSWORD POLICY =====
+    If Not _CheckPasswordPolicy($p1) Then
+        MsgBox(16, "Mật khẩu yếu", _
+            "Mật khẩu phải có:" & @CRLF & _
+            "- Ít nhất 8 ký tự" & @CRLF & _
+            "- Chữ IN HOA" & @CRLF & _
+            "- Chữ thường" & @CRLF & _
+            "- SỐ (0-9)" & @CRLF & _
+            "- Ký tự đặc biệt (!@#$%^&*)" _
+        )
+        _WriteLog("ERROR - Mật khẩu không đạt policy | User=" & $sUser)
+        Return
+    EndIf
+
+    If $iDays < 1 Or $iDays > 999 Then
+        MsgBox(48, "Không hợp lệ", "Số ngày phải từ 1 đến 999")
+        Return
+    EndIf
+
+    _WriteLog("Bắt đầu đổi mật khẩu | User=" & $sUser & " | Expire=" & $iDays & " ngày")
+
+    Local $iRet1 = RunWait(@ComSpec & ' /c net user "' & $sUser & '" "' & $p1 & '"', "", @SW_HIDE)
+    Local $iRet2 = RunWait(@ComSpec & ' /c wmic UserAccount where Name="' & $sUser & '" set PasswordExpires=True', "", @SW_HIDE)
+    Local $iRet3 = RunWait(@ComSpec & ' /c net accounts /maxpwage:' & $iDays, "", @SW_HIDE)
+
+    If $iRet1 <> 0 Or $iRet2 <> 0 Or $iRet3 <> 0 Then
+        MsgBox(16, "Thất bại", "Đổi mật khẩu KHÔNG thành công")
+        _WriteLog("FAIL - ExitCode: " & $iRet1 & "/" & $iRet2 & "/" & $iRet3)
+        Return
+    EndIf
+
+    _WriteLog("SUCCESS - Đổi mật khẩu thành công")
+
+    _EnableScreenSaver_1Min_Logon()
+
+    MsgBox(64, "Hoàn tất", _
+        "Đã đổi mật khẩu cho user: " & $sUser & @CRLF & _
+        "Mọi khó khăn vui lòng liên hệ Tùng Nguyễn.")
+
+    _LockNow()
+EndFunc
+
+Func _TogglePassword()
+    $g_bShowPass = Not $g_bShowPass
+    Local $s1 = GUICtrlRead($inpPass1)
+    Local $s2 = GUICtrlRead($inpPass2)
+
+    GUICtrlDelete($inpPass1)
+    GUICtrlDelete($inpPass2)
+
+    If $g_bShowPass Then
+        $inpPass1 = GUICtrlCreateInput($s1, 150, 65, 240, 25)
+        $inpPass2 = GUICtrlCreateInput($s2, 150, 105, 240, 25)
+    Else
+        $inpPass1 = GUICtrlCreateInput($s1, 150, 65, 240, 25, $ES_PASSWORD)
+        $inpPass2 = GUICtrlCreateInput($s2, 150, 105, 240, 25, $ES_PASSWORD)
+    EndIf
+EndFunc
+
+Func _WriteLog($sText)
+    If Not FileExists($g_sLogDir) Then DirCreate($g_sLogDir)
+    Local $h = FileOpen($g_sLogFile, 1)
+    If $h = -1 Then Return
+    FileWriteLine($h, _NowCalc() & " | " & $sText)
+    FileClose($h)
+EndFunc
+
+; =========================
+; PASSWORD POLICY
+; =========================
+Func _CheckPasswordPolicy($sPass)
+    If StringLen($sPass) < 8 Then Return False
+    If Not StringRegExp($sPass, "[a-z]") Then Return False
+    If Not StringRegExp($sPass, "[A-Z]") Then Return False
+    If Not StringRegExp($sPass, "[0-9]") Then Return False
+    If Not StringRegExp($sPass, "[^A-Za-z0-9]") Then Return False
+    Return True
+EndFunc
+
+; =========================
+; SCREEN SAVER 1 MIN + LOGON
+; =========================
+Func _EnableScreenSaver_1Min_Logon()
+    RegWrite("HKCU\Control Panel\Desktop", "ScreenSaveActive", "REG_SZ", "1")
+    RegWrite("HKCU\Control Panel\Desktop", "ScreenSaveTimeOut", "REG_SZ", "60")
+    RegWrite("HKCU\Control Panel\Desktop", "ScreenSaverIsSecure", "REG_SZ", "1")
+    RegWrite("HKCU\Control Panel\Desktop", "SCRNSAVE.EXE", "REG_SZ", @SystemDir & "\scrnsave.scr")
+
+    DllCall("user32.dll", "int", "SystemParametersInfo", "uint", 20, "uint", 1, "uint", 0, "uint", 2)
+    DllCall("user32.dll", "int", "SystemParametersInfo", "uint", 15, "uint", 60, "uint", 0, "uint", 2)
+EndFunc
+
+; =========================
+; LOCK WORKSTATION
+; =========================
+Func _LockNow()
+    DllCall("user32.dll", "int", "LockWorkStation")
+EndFunc
